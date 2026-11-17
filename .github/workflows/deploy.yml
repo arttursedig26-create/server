@@ -1,0 +1,86 @@
+name: Deploy RecFlare to Cloudflare
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: recflare-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Install, migrate, and deploy all Workers
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      RECFLARE_DOMAIN: ${{ secrets.RECFLARE_DOMAIN }}
+      RECFLARE_D1: ${{ secrets.RECFLARE_D1 }}
+      RECFLARE_KV: ${{ secrets.RECFLARE_KV }}
+      RECFLARE_SECRETS_STORE: ${{ secrets.RECFLARE_SECRETS_STORE }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Set up Just
+        uses: extractions/setup-just@v2
+
+      - name: Validate deployment secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=(CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID RECFLARE_DOMAIN RECFLARE_D1 RECFLARE_KV RECFLARE_SECRETS_STORE)
+          missing=()
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then missing+=("$name"); fi
+          done
+          if (( ${#missing[@]} )); then
+            printf 'Missing GitHub Actions secrets: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+          if [[ ! "$RECFLARE_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]]; then
+            echo "RECFLARE_DOMAIN must be a hostname, without https:// or a path." >&2
+            exit 1
+          fi
+
+      - name: Create deployment environment file
+        shell: bash
+        run: |
+          {
+            printf 'RECFLARE_DOMAIN=%s\n' "$RECFLARE_DOMAIN"
+            printf 'RECFLARE_D1=%s\n' "$RECFLARE_D1"
+            printf 'RECFLARE_KV=%s\n' "$RECFLARE_KV"
+            printf 'RECFLARE_SECRETS_STORE=%s\n' "$RECFLARE_SECRETS_STORE"
+          } > .env
+
+      - name: Install dependencies
+        run: just install
+
+      - name: Check project
+        run: just check
+
+      - name: Apply database migrations
+        run: just migrate
+
+      - name: Deploy every Cloudflare Worker
+        run: just deploy
